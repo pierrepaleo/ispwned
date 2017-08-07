@@ -97,7 +97,7 @@ class PasswordChecker(object):
         last_line = self.fid.readline()
         end_val = int(last_line[:10], 16) # TODO
 
-        while end_pos - begin_pos > self.buffsize*self.itemsize*self.nlines//10: # TODO bound (see below)
+        while end_pos - begin_pos > self.buffsize*self.itemsize*self.nlines/10: # TODO: custom bound
             mid_pos = (end_pos + begin_pos)//2
             if (mid_pos % self.itemsize):
                 mid_pos -= (mid_pos % self.itemsize)
@@ -112,13 +112,14 @@ class PasswordChecker(object):
             else:
                 end_pos = mid_pos
             logging.debug("Search between %d and %d" % (begin_pos, end_pos))
-        # TODO: seek "early enough", difficult to guess when "many" iterations of bisection
+
         if (prev_begin_pos % self.itemsize):
             prev_begin_pos -= (prev_begin_pos % self.itemsize)
         return prev_begin_pos
 
 
     def linear_search(self, passwd, search_pos):
+        self.fid.seek(search_pos)
         first_two_letters_val = int(passwd[:2], 16)
         pass_found = 0
         nbytes = self.buffsize * self.itemsize * self.nlines
