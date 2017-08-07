@@ -29,128 +29,149 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-import sys
 import hashlib
 import re
-sha1 = hashlib.sha1()
-sha1_re = re.compile('^[0-9a-f]{40}$', flags=re.IGNORECASE)
-# TODO: automatically compute this
-block_size = 196*40 # minimum number of lines read (platform-dependent)
+import argparse
+import logging
+logging.basicConfig(filename='passwordcheck_debug.log', filemode='w',
+                    format='%(asctime)s %(levelname)s %(message)s',
+                    datefmt='%m/%d/%Y %I:%M:%S', level=logging.DEBUG)
+
 
 # TODO: user-defined maximum cache size.
 # Once rstripped: Size = (lines * 40)/1e6   MBytes
 #   lines = S_max * 1e6/40.     [where S_max is in MBytes], up to round to block_size
 
 
-
-
-def detect_sha1(passwd):
+class PasswordChecker(object):
     """
-    Detects if a password is a SHA1 digest.
+    Check if a password is in a database of "leaked" passwords.
     """
-    match_result = sha1_re.findall(passwd)
-    return (match_result != [])
+
+    sha1_re = re.compile('^[0-9a-f]{40}$', flags=re.IGNORECASE)
+
+    def __init__(self, db_fname):
+        self.db_fname = db_fname
+        self.fid = open(db_fname, "r")
+        self.get_buffer_size()
+        self.nlines = 1000 # TODO: user-defined (eg. from max bytes)
 
 
+    def get_buffer_size(self):
+        lines = self.fid.readlines(1)
+        self.buffsize = len(lines)
+        self.itemsize = len(lines[0])
+        self.fid.seek(0)
+
+
+    def detect_sha1(self, passwd):
+        """
+        Detects if a password is a SHA1 digest.
+        """
+        match_result = self.sha1_re.findall(passwd)
+        return (match_result != [])
+
+
+    def hash_password_if_necessary(self, passwd):
+        if not(self.detect_sha1(passwd)):
+            logging.debug("hashing")
+            res = hashlib.sha1(passwd).hexdigest()
+        else:
+            logging.debug("not hashing")
+            res = passwd
+        res = res.upper()
+        logging.debug("Password: %s" % res)
+        return res
+
+
+    def bisection_search(self, passwd):
+        first_letters_val = int(passwd[:10], 16)
+
+        begin_pos = 0
+        first_line = self.fid.readline()
+        begin_val = int(first_line[:10], 16) # TODO try :4, ..., :10  for best performances
+
+        # TODO check if this mechanism is actually working on the current platform
+        self.fid.seek(-self.itemsize, 2)
+        end_pos = self.fid.tell()
+        last_line = self.fid.readline()
+        end_val = int(last_line[:10], 16) # TODO
+
+        while end_pos - begin_pos > self.buffsize*self.itemsize*self.nlines//10: # TODO bound (see below)
+            mid_pos = (end_pos + begin_pos)//2
+            if (mid_pos % self.itemsize):
+                mid_pos -= (mid_pos % self.itemsize)
+            self.fid.seek(mid_pos)
+            mid_line = self.fid.readline()
+            mid_val = int(mid_line[:10], 16)
+            logging.debug("v: %s \t c: %s" % (passwd[:10], mid_line.rstrip()))
+            logging.debug("v=%d (?)> c=%d" % (first_letters_val, mid_val))
+            if first_letters_val > mid_val:
+                prev_begin_pos = begin_pos
+                begin_pos = mid_pos
+            else:
+                end_pos = mid_pos
+            logging.debug("Search between %d and %d" % (begin_pos, end_pos))
+        # TODO: seek "early enough", difficult to guess when "many" iterations of bisection
+        if (prev_begin_pos % self.itemsize):
+            prev_begin_pos -= (prev_begin_pos % self.itemsize)
+        return prev_begin_pos
+
+
+    def linear_search(self, passwd, search_pos):
+        first_two_letters_val = int(passwd[:2], 16)
+        pass_found = 0
+        nbytes = self.buffsize * self.itemsize * self.nlines
+        while not(pass_found):
+            lines = self.fid.readlines(nbytes)
+            if lines == []:
+                break
+            logging.debug("Read %d lines" % len(lines))
+            logging.debug("Start: %s" % lines[0][:2])
+            if first_two_letters_val < int(lines[0][:2], 16):
+                break # cf previous Bisection
+            # Build sub-hashtable from read lines
+            lines = map(lambda x : x.rstrip(), lines)
+            hashtable = dict.fromkeys(lines)
+            if hashtable.has_key(passwd):
+                pass_found = 1 # TODO location (lines interval) in file ?
+        return pass_found
+
+
+    def check_password(self, passwd):
+        passwd = self.hash_password_if_necessary(passwd)
+        search_pos = self.bisection_search(passwd)
+        res = self.linear_search(passwd, search_pos)
+        return res
+
+
+    def __del__(self):
+        self.fid.close()
+
+    __call__ = check_password
 
 
 
 if __name__ == "__main__":
 
-    # TODO parse arguments: -f <database.txt>
+    arg_parser = argparse.ArgumentParser(description='Find whether a password (or hash) has been pwned')
+    arg_parser.add_argument('-f', '--filename', metavar='filename',
+                            help='File containing one SHA1 per line, sorted in ascending order (text format)')
+    arg_parser.add_argument('password', nargs='+', help='password or SHA1 to check')
+    args = arg_parser.parse_args()
 
-    args = sys.argv[1:]
-    if args == []:
-        print("Usage: %s <password>" % sys.argv[0])
-        sys.exit(1)
-    passwd = args[0]
-    if not(detect_sha1(passwd)):
-        print("hashing")
-        sha1.update(passwd)
-        passwd = sha1.hexdigest().upper()
+    if args.filename:
+        db_fname = args.filename
     else:
-        passwd = passwd.upper()
-
-    print(passwd)
-    first_two_letters = passwd[:2]
-    first_letters_val = int(passwd[:10], 16)
-
-    fid = open("pwned-passwords-1.0.txt", "r") # TODO custom file name
+        db_fname = "pwned-passwords-1.0.txt"
+    passwd = " ".join(args.password)
 
 
-
-    first_line = fid.readline()
-    begin_pos = 0
-    fid.seek(-42, 2) # TODO check if this mechanism works at class instanciation
-    end_pos = fid.tell()
-    last_line = fid.readline()
-
-    begin_val = int(first_line[:10], 16) # TODO try :4, ..., :10  for best performances
-    end_val = int(last_line[:10], 16)
-
-
-    # Bisection search (sorted database)
-    while end_pos - begin_pos > 196*42*1000:
-        mid_pos = (end_pos + begin_pos)//2
-        if (mid_pos % 42):
-            mid_pos -= (mid_pos % 42)
-        assert((mid_pos % 42) == 0)
-        fid.seek(mid_pos)
-        mid_line = fid.readline()
-        mid_val = int(mid_line[:10], 16)
-
-        print("v: %s \t c: %s" % (passwd[:10], mid_line.rstrip()))
-        print("v=%d (?)> c=%d" % (first_letters_val, mid_val))
-        if first_letters_val > mid_val:
-            prev_begin_pos = begin_pos
-            begin_pos = mid_pos
-        else:
-            end_pos = mid_pos
-
-        print("Search between %d and %d" % (begin_pos, end_pos))
-
-    #~ begin_pos -= 42*1600000
-    # TODO: seek "early enough", difficult to guess when "many" iterations of bisection
-    assert((prev_begin_pos % 42) == 0)
-    fid.seek(prev_begin_pos)
-
-
-    pass_found = 0
-    while not(pass_found): # TODO user "max-time"
-        lines = fid.readlines(196*40*1000) # TODO: block size
-        if lines == []:
-            break
-        print("Read %d lines" % len(lines))
-
-        print("Start: %s" % lines[0][:2])
-        if int(first_two_letters, 16) < int(lines[0][:2], 16):
-            break # cf previous Bisection
-
-        lines = map(lambda x : x.rstrip(), lines)
-        hashtable = dict.fromkeys(lines)
-        if hashtable.has_key(passwd):
-            pass_found = 1 # TODO line number ?
-    fid.close()
+    C = PasswordChecker(db_fname)
+    pass_found = C(passwd)
 
     if pass_found:
         print("Password found !")
     else:
         print("Password not found")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
