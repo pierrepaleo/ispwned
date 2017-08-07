@@ -43,6 +43,12 @@ logging.basicConfig(filename='passwordcheck_debug.log', filemode='w',
 #   lines = S_max * 1e6/40.     [where S_max is in MBytes], up to round to block_size
 
 
+# TODO: cache bisection, build an index
+#    00 -> 0
+#    01 -> ...
+#    A0 ->  ...
+
+
 class PasswordChecker(object):
     """
     Check if a password is in a database of "leaked" passwords.
